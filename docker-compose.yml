@@ -1,0 +1,121 @@
+# FastSewa API on a single Docker host.
+#
+#   cp .env.example .env                                   # then fill in the secrets (comments in that file)
+#   docker compose up -d --build                           # the API; DATABASE_URL points at your managed Postgres
+#   docker compose --profile local-db up -d --build        # the API plus a Postgres container on this host
+#   docker compose --profile redis up -d                   # add Redis once you run more than one API container
+#   docker compose logs -f api
+#
+# To run an image your CI already built instead of building here:
+#   API_IMAGE=ghcr.io/<owner>/fastsewa-api:3.0.0 docker compose pull api
+#   API_IMAGE=ghcr.io/<owner>/fastsewa-api:3.0.0 docker compose up -d --no-build
+#
+# The API applies pending database migrations before it starts (docker-entrypoint.sh) and stops
+# cleanly on `docker compose stop`/`down`. nginx (nginx/fastsewa.conf) runs on the host and proxies
+# to 127.0.0.1:5000, which is why the API port is published on the loopback address only.
+
+name: fastsewa
+
+services:
+  api:
+    image: ${API_IMAGE:-fastsewa-api:local}
+    build:
+      context: .
+      target: production
+      args:
+        APP_VERSION: ${APP_VERSION:-3.0.0}
+        GIT_SHA: ${GIT_SHA:-unknown}
+    restart: unless-stopped
+    # Every setting the API reads is documented in .env.example. A missing or unsafe production
+    # value (placeholder secret, http:// public URL, ...) stops the container with a list of what to fix.
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: "5000"
+      HOST: 0.0.0.0
+      UPLOADS_DIR: /data/uploads # the volume below; only used when MEDIA_PROVIDER=local
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false # only when the local-db profile is on
+      redis:
+        condition: service_healthy
+        required: false # only when the redis profile is on
+    # The image's own HEALTHCHECK (liveness, never touches the database) applies; readiness is
+    # GET /api/health/ready for a load balancer.
+    stop_grace_period: 30s # the API drains for 5 s and force-closes after 25 s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "10"
+
+  # PostgreSQL on this host. Skip it (leave the profile off) when you use a managed database,
+  # which is the recommended production setup: backups, failover and patching are then the provider's job.
+  # Set DATABASE_URL=postgresql://fastsewa:<DB_PASSWORD>@db:5432/fastsewa in .env (the host name "db" is
+  # recognised as local, so no TLS settings are needed on the compose network).
+  db:
+    image: postgres:16-alpine
+    profiles: ["local-db"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fastsewa
+      POSTGRES_USER: fastsewa
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-} # the image refuses to start with an empty password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    shm_size: 128mb
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastsewa -d fastsewa"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Not published on any host port. Back up with scripts/ops/backup-db.sh --compose.
+
+  # Shared rate-limit counters for several API containers. One container does not need it (the API
+  # keeps counters in memory and says so in its start-up log). Set REDIS_URL=redis://:<REDIS_PASSWORD>@redis:6379.
+  # Nothing here is worth keeping across restarts, so there is no volume.
+  redis:
+    image: redis:7-alpine
+    profiles: ["redis"]
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-} # lets the health check run redis-cli without -a on the command line
+    command:
+      - sh
+      - -c
+      - 'test -n "$$REDIS_PASSWORD" || { echo "set REDIS_PASSWORD in .env"; exit 1; }; exec redis-server --requirepass "$$REDIS_PASSWORD" --save "" --appendonly no --maxmemory 128mb --maxmemory-policy allkeys-lru'
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  uploads:
+  postgres-data:

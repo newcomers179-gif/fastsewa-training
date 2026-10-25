@@ -1,0 +1,78 @@
+{
+  "expo": {
+    "name": "FastSewa Training",
+    "slug": "fastsewa-training",
+    "version": "3.0.0",
+    "orientation": "portrait",
+    "icon": "./client/assets/images/icon.png",
+    "scheme": "fastsewa",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./client/assets/images/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1F2A33"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.fastsewa.training",
+      "config": {
+        "usesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./client/assets/images/adaptive-icon.png",
+        "backgroundColor": "#1F2A33"
+      },
+      "package": "com.fastsewa.training",
+      "allowBackup": false,
+      "permissions": [],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./client/assets/images/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-localization",
+        {
+          "supportedLocales": {
+            "ios": ["en", "hi"],
+            "android": ["en", "hi"]
+          }
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./client/assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#1F2A33"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./client/assets/images/notification-icon.png",
+          "color": "#C2410C",
+          "defaultChannel": "training-reminders",
+          "sounds": [],
+          "mode": "production"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "YOUR_EAS_PROJECT_ID"
+      }
+    }
+  }
+}

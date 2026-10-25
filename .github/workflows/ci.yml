@@ -1,0 +1,149 @@
+name: CI
+
+# Every pull request and every push to main: types, lint, tests (against a real PostgreSQL), the
+# production build, a dependency audit, a bundle of the mobile app, and a smoke test of the Docker image.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Types, lint, tests, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fastsewa_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d fastsewa_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # The tests empty their tables: the database name must contain "test" (the test setup checks it).
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/fastsewa_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # --ignore-scripts: no dependency gets to run code during install. Nothing here needs it.
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Type-check (app, server, admin console)
+        run: npm run check:types
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      - name: Build (API bundle and admin console)
+        run: npm run build
+
+      # The server's production dependencies must have no known high or critical advisory.
+      # (The Expo/Metro build tooling has a long tail of advisories that never ship to the API
+      # or to a phone; Dependabot tracks it.)
+      - name: Audit production dependencies of the API
+        run: npm audit --omit=dev --workspace=server --audit-level=high
+
+  app-bundle:
+    name: Mobile app bundles
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      # Catches anything Metro cannot resolve or Hermes cannot compile before a store build does.
+      - name: Export the Android bundle
+        env:
+          CI: "1"
+          EXPO_PUBLIC_API_URL: https://api.fastsewa.test
+        run: npx expo export --platform android --output-dir "$RUNNER_TEMP/export-android"
+
+  docker:
+    name: Docker image starts and answers
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          load: true
+          tags: fastsewa-api:ci
+          build-args: |
+            APP_VERSION=ci
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The same compose file people deploy with, with a throw-away database: the image has to start
+      # as a non-root user on a read-only file system, apply every migration to an empty database, and
+      # answer its health checks.
+      - name: Start the stack
+        env:
+          API_IMAGE: fastsewa-api:ci
+        run: |
+          DB_PASSWORD="$(openssl rand -hex 16)"
+          {
+            echo "PUBLIC_BASE_URL=https://api.fastsewa.test"
+            echo "DATABASE_URL=postgresql://fastsewa:${DB_PASSWORD}@db:5432/fastsewa"
+            echo "DB_PASSWORD=${DB_PASSWORD}"
+            echo "JWT_SECRET=$(openssl rand -hex 32)"
+            echo "ALLOWED_ORIGINS="
+            echo "REGISTRATION_MODE=closed"
+          } > .env
+          docker compose --profile local-db up --detach --no-build --wait --wait-timeout 180
+
+      - name: Probe it
+        run: |
+          curl --fail --silent --show-error http://127.0.0.1:5000/api/health
+          echo
+          curl --fail --silent --show-error http://127.0.0.1:5000/api/health/ready
+          echo
+          curl --fail --silent --show-error --output /dev/null http://127.0.0.1:5000/admin/
+          curl --fail --silent --show-error http://127.0.0.1:5000/api/v1/config
+          echo
+
+      - name: Show the logs when something failed
+        if: failure()
+        run: docker compose --profile local-db logs --no-color
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose --profile local-db down --volumes

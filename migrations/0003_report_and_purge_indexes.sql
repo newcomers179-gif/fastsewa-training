@@ -1,0 +1,3 @@
+CREATE INDEX "lesson_progress_updated_idx" ON "lesson_progress" USING btree ("updated_at");--> statement-breakpoint
+CREATE INDEX "refresh_tokens_rotated_idx" ON "refresh_tokens" USING btree ("rotated_at") WHERE "refresh_tokens"."rotated_at" IS NOT NULL;--> statement-breakpoint
+CREATE INDEX "refresh_tokens_revoked_idx" ON "refresh_tokens" USING btree ("revoked_at") WHERE "refresh_tokens"."revoked_at" IS NOT NULL;

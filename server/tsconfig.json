@@ -1,0 +1,30 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "lib": [
+      "ES2023"
+    ],
+    "types": [
+      "node"
+    ],
+    "baseUrl": "..",
+    "paths": {
+      "@shared/*": [
+        "shared/*"
+      ]
+    },
+    "rootDir": ".."
+  },
+  "include": [
+    "./**/*",
+    "../shared/**/*",
+    "../scripts/**/*",
+    "../drizzle.config.ts"
+  ],
+  "exclude": [
+    "../node_modules",
+    "node_modules",
+    "../dist"
+  ]
+}

@@ -1,0 +1,25 @@
+# Keep the build context small and keep secrets out of image layers.
+.git
+.github
+.expo
+.vscode
+node_modules
+**/node_modules
+dist
+admin/dist
+coverage
+backups
+docs
+nginx
+client
+*.md
+*.log
+.DS_Store
+
+# secrets and local settings
+.env
+.env.*
+!.env.example
+google-service-account.json
+*.pem
+*.key

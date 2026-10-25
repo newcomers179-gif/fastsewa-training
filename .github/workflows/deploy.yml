@@ -1,0 +1,126 @@
+name: Release
+
+# Publishes the API image to GitHub's container registry and, if you set it up, tells your host to
+# deploy it and then checks that the new version really answers.
+#
+#   git tag v3.0.1 && git push origin v3.0.1            (the tag must equal "version" in package.json)
+#
+# Optional settings (repository Settings > Secrets and variables > Actions):
+#   secret   DEPLOY_HOOK_URL   a URL that starts a deploy when it receives a POST (Render deploy hook,
+#                              Portainer webhook, your own endpoint). Without it the image is only published.
+#   variable API_URL           the public address of the API, e.g. https://api.yourdomain.com. With it the
+#                              workflow waits until /api/health reports the new version.
+# Create an environment called "production" and add required reviewers to make a person approve each deploy.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build and publish the image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the version and check it
+        id: version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          app_version="$(node -p "require('./app.json').expo.version")"
+          server_version="$(node -p "require('./server/package.json').version")"
+          if [ "$version" != "$app_version" ] || [ "$version" != "$server_version" ]; then
+            echo "::error::Versions differ: package.json=$version app.json=$app_version server/package.json=$server_version"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match the project version v${version}"
+            exit 1
+          fi
+          echo "value=${version}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image names and tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-api
+          tags: |
+            type=raw,value=${{ steps.version.outputs.value }}
+            type=sha,format=long
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.version.outputs.value }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy and verify
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      DEPLOY_HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+      API_URL: ${{ vars.API_URL }}
+      VERSION: ${{ needs.image.outputs.version }}
+    steps:
+      - name: Start the deploy
+        run: |
+          if [ -z "$DEPLOY_HOOK_URL" ]; then
+            echo "::notice::No DEPLOY_HOOK_URL secret: the image ghcr.io/${GITHUB_REPOSITORY,,}-api:${VERSION} is published, deploy it on your server (DEPLOYMENT.md)."
+            exit 0
+          fi
+          curl --fail --silent --show-error --max-time 60 -X POST "$DEPLOY_HOOK_URL" > /dev/null
+          echo "Deploy requested for ${VERSION}"
+
+      # A deploy that does not come up is a failed release, not a green tick.
+      - name: Wait for the new version
+        run: |
+          if [ -z "$DEPLOY_HOOK_URL" ] || [ -z "$API_URL" ]; then
+            echo "::notice::Set the API_URL variable (and DEPLOY_HOOK_URL) to have the workflow verify the deploy."
+            exit 0
+          fi
+          for attempt in $(seq 1 40); do
+            reported="$(curl --silent --max-time 10 "${API_URL%/}/api/health" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).version||'')}catch{console.log('')}})")"
+            echo "attempt ${attempt}: the API reports version '${reported}', expecting '${VERSION}'"
+            if [ "$reported" = "$VERSION" ]; then
+              curl --fail --silent --show-error --max-time 10 "${API_URL%/}/api/v1/config" > /dev/null
+              echo "Deployed and answering."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::${API_URL} did not report version ${VERSION} within 10 minutes. Check the host, and roll back to the previous image if needed (docs/RUNBOOK.md)."
+          exit 1
